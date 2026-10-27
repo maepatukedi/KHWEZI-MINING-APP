@@ -4,7 +4,8 @@ import altair as alt
 import base64
 import importlib
 import sqlite3
-import json 
+import json
+
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -12,6 +13,12 @@ from contextlib import contextmanager
 
 BASE = Path(__file__).resolve().parent
 DATABASE = BASE / "safety_incidents.db"
+USERS_FILE = BASE / "users.json"
+
+ALL_ROLES = {
+    "Administrator", "Safety Officer", "Mining Engineer",
+    "Maintenance Engineer", "Manager"
+}
 
 SAFETY_ROLES = {
     "Administrator",
@@ -1222,29 +1229,20 @@ def render_equipment_page(role):
 
 def render_reports(role):
 
-    st.subheader(
-        " Operational Reports"
-    )
+    # Reports include downloads of multiple datasets, so restrict them.
+    if role != "Administrator":
+        st.error("Access denied. Only an Administrator can access all operational reports.")
+        st.stop()
 
-    if (
-        BASE / "person4_dashboard.py"
-    ).is_file():
+    st.subheader("Operational Reports")
 
-        if import_render(
-            "person4_dashboard",
-            "render_dashboard",
-            role
-        ):
+    if (BASE / "person4_dashboard.py").is_file():
+        if import_render("person4_dashboard", "render_dashboard", role):
             return
 
-    st.info(
-        "Member 4 can upload person4_dashboard.py "
-        "for advanced analytics. "
-        "Basic reports are available below."
-    )
+    st.info("Basic operational reports are available below.")
 
     incidents = get_incidents()
-
     st.download_button(
         "Download Safety Incidents",
         incidents.to_csv(index=False),
@@ -1253,9 +1251,7 @@ def render_reports(role):
     )
 
     workers = load_workers()
-
     if workers is not None:
-
         st.download_button(
             "Download Worker Records",
             workers.to_csv(index=False),
@@ -1264,9 +1260,7 @@ def render_reports(role):
         )
 
     equipment, _ = load_equipment()
-
     if equipment is not None:
-
         st.download_button(
             "Download Equipment Records",
             equipment.to_csv(index=False),
@@ -1278,261 +1272,131 @@ def render_reports(role):
 
 
 def pages_for(role):
-
-    pages = [
-        "View Dashboard"
-    ]
+    """Return only the pages permitted for the authenticated role."""
+    pages = ["View Dashboard"]
 
     if role in SAFETY_ROLES:
-
-        pages.extend([
-            "Worker Safety Logs",
-            "Incident Reports",
-            "Risk Matrix"
-        ])
+        pages.extend(["Worker Safety Logs", "Incident Reports", "Risk Matrix"])
 
     if role in EQUIPMENT_ROLES:
-
         pages.extend([
-            "Equipment Telemetry",
-            "Equipment Database",
-            "Condition Monitoring",
-            "Equipment Alerts",
-            "Maintenance Schedules",
-            "Equipment Analysis"
+            "Equipment Telemetry", "Equipment Database", "Condition Monitoring",
+            "Equipment Alerts", "Maintenance Schedules", "Equipment Analysis"
         ])
 
-    pages.append(
-        "Operational Reports"
-    )
-
+    # This page can download all datasets, so restrict it to administrators.
     if role == "Administrator":
-
-        pages.append(
-            "User Control Panel"
-        )
+        pages.extend(["Operational Reports", "User Control Panel"])
 
     return pages
 
+
 # LOGIN INTERFACE
 
-USERS_FILE = BASE / "users.json"
+def load_users():
+    """Load demonstration accounts from users.json."""
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as file:
+            users = json.load(file)
+        return users if isinstance(users, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
 
 
 def render_login():
     show_banner()
-
     st.subheader("Security & Access Control Gateway")
     st.write("Enter your username and password to continue.")
 
-    with st.form("login"):
-        username = st.text_input("Username")
-        password = st.text_input(
-            "Password",
-            type="password"
-        )
-
+    with st.form("login_form"):
+        username = st.text_input("Username").strip()
+        password = st.text_input("Password", type="password")
         clicked = st.form_submit_button("Login")
 
     if clicked:
-        try:
-            with open(USERS_FILE, "r", encoding="utf-8") as file:
-                users = json.load(file)
-
-        except (FileNotFoundError, json.JSONDecodeError):
-            st.error("User database is missing or invalid.")
+        users = load_users()
+        if not users:
+            st.error("Unable to load users.json. Check that it exists beside app.py and contains valid JSON.")
             return
 
-        user = users.get(username.strip())
-
-        if user and user.get("password") == password:
-            role = user.get("role")
-
-            st.session_state.update(
-                auth_token=True,
-                id_tag=username.strip(),
-                tier=role
-            )
-
-            st.rerun()
-
-        else:
+        user = users.get(username)
+        if not isinstance(user, dict) or user.get("password") != password:
             st.error("Invalid username or password.")
+            return
 
+        role = user.get("role")
+        if role not in ALL_ROLES:
+            st.error("This account has an invalid or unsupported role.")
+            return
 
+        st.session_state.update(
+            auth_token=True,
+            id_tag=username,
+            tier=role
+        )
+        st.rerun()
 
 # MAIN DASHBOARD
 
 
-def render_dashboard():
-
-    incidents = get_incidents()
-
-    workers = load_workers()
-
-    equipment, stats = load_equipment()
-
+def render_dashboard(role):
+    """Show dashboard metrics appropriate to the current user's role."""
     st.markdown(
-        '<div class="mine-section">'
-        ' Central Monitoring Dashboard'
-        '</div>',
+        '<div class="mine-section">Role-Based Monitoring Dashboard</div>',
         unsafe_allow_html=True
     )
+    st.write(f"Welcome, **{st.session_state.get('id_tag', 'User')}**. Your role is **{role}**.")
 
-    a, b, c, d = st.columns(4)
+    if role in SAFETY_ROLES:
+        incidents = get_incidents()
+        workers = load_workers()
+        st.markdown('<div class="mine-section">Worker Safety Overview</div>', unsafe_allow_html=True)
+        a, b, c = st.columns(3)
+        a.metric("Total Workers", len(workers) if workers is not None else "No data")
+        a_incidents = len(incidents) if incidents is not None else 0
+        b.metric("Safety Incidents", a_incidents)
+        near_misses = 0
+        high_risk = 0
+        if incidents is not None and not incidents.empty:
+            if "category" in incidents.columns:
+                near_misses = int(incidents["category"].astype(str).str.casefold().eq("near miss").sum())
+            if "risk_classification" in incidents.columns:
+                high_risk = int(incidents["risk_classification"].astype(str).eq("High").sum())
+        c.metric("Near Misses", near_misses)
+        st.metric("High-Risk Incidents", high_risk)
+        if incidents is not None and not incidents.empty:
+            with st.expander("Preview Safety Incident Records"):
+                st.dataframe(incidents.head(10), hide_index=True, use_container_width=True)
 
-    a.metric(
-        "Total Workers",
-        len(workers)
-        if workers is not None
-        else "No data"
-    )
+    if role in EQUIPMENT_ROLES:
+        equipment, stats = load_equipment()
+        st.markdown('<div class="mine-section">Equipment Overview</div>', unsafe_allow_html=True)
+        if equipment is None:
+            st.info("Equipment data is not available.")
+        else:
+            availability = stats.get("avg_availability") if isinstance(stats, dict) else None
+            critical = stats.get("critical_alerts", "No data") if isinstance(stats, dict) else "No data"
+            a, b = st.columns(2)
+            a.metric("Equipment Records", len(equipment))
+            b.metric("Critical Equipment Alerts", critical)
+            if availability is not None:
+                st.metric("Average Equipment Availability", f"{float(availability):.1f}%")
+            if {"Equipment_ID", "Availability"}.issubset(equipment.columns):
+                chart_data = equipment.copy()
+                chart_data["Availability"] = pd.to_numeric(chart_data["Availability"], errors="coerce")
+                chart_data = chart_data.dropna(subset=["Availability"])
+                if not chart_data.empty:
+                    chart = alt.Chart(chart_data).mark_bar().encode(
+                        x="Equipment_ID:N",
+                        y=alt.Y("Availability:Q", scale=alt.Scale(domain=[0, 100])),
+                        tooltip=["Equipment_ID:N", "Availability:Q"]
+                    ).properties(height=280)
+                    st.altair_chart(chart, use_container_width=True)
 
-    b.metric(
-        "Safety Incidents",
-        len(incidents)
-    )
+    if role == "Administrator":
+        st.info("As Administrator, you can access both safety and equipment information, plus user and operational reports.")
 
-    availability = (
-        stats.get("avg_availability")
-        if isinstance(stats, dict)
-        else None
-    )
-
-    c.metric(
-        "Equipment Availability",
-        f"{float(availability):.1f}%"
-        if availability is not None
-        else "No data"
-    )
-
-    d.metric(
-        "Critical Equipment Alerts",
-        stats.get(
-            "critical_alerts",
-            "No data"
-        )
-        if isinstance(stats, dict)
-        else "No data"
-    )
-
-    st.markdown(
-        '<div class="guide-banner">'
-        ' Use the sidebar to view '
-        'each group member’s work.'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    # SAFETY INCIDENT SUMMARY
-
-    st.markdown(
-        '<div class="mine-section">'
-        ' Safety Incident Overview'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    x, y, z = st.columns(3)
-
-    x.metric(
-        "Near Misses",
-        int(
-            incidents["category"]
-            .astype(str)
-            .str.casefold()
-            .eq("near miss")
-            .sum()
-        )
-    )
-
-    y.metric(
-        "High-Risk Incidents",
-        int(
-            incidents["risk_classification"]
-            .eq("High")
-            .sum()
-        )
-    )
-
-    z.metric(
-        "Critical-Risk Incidents",
-        int(
-            incidents["risk_classification"]
-            .eq("Critical")
-            .sum()
-        )
-    )
-
-    with st.expander(
-        "Preview Safety Incident Records"
-    ):
-
-        st.dataframe(
-            incidents.head(10),
-            hide_index=True,
-            use_container_width=True
-        )
-
-    # EQUIPMENT CHART
-
-    if equipment is not None:
-
-        if {
-            "Equipment_ID",
-            "Availability"
-        }.issubset(equipment.columns):
-
-            st.markdown(
-                '<div class="mine-section">'
-                ' Equipment Monitoring Analysis'
-                '</div>',
-                unsafe_allow_html=True
-            )
-
-            equipment["Availability"] = (
-                pd.to_numeric(
-                    equipment["Availability"],
-                    errors="coerce"
-                )
-            )
-
-            chart = (
-                alt.Chart(
-                    equipment.dropna(
-                        subset=["Availability"]
-                    )
-                )
-                .mark_bar()
-                .encode(
-                    x="Equipment_ID:N",
-
-                    y=alt.Y(
-                        "Availability:Q",
-                        scale=alt.Scale(
-                            domain=[0, 100]
-                        )
-                    ),
-
-                    tooltip=[
-                        "Equipment_ID:N",
-                        "Availability:Q"
-                    ]
-                )
-                .properties(
-                    height=280
-                )
-            )
-
-            st.altair_chart(
-                chart,
-                use_container_width=True
-            )
-
-    st.caption(
-        "Demonstration data and local records. "
-        "Not live mine telemetry."
-    )
+    st.caption("Demonstration data and local records. Not live mine telemetry.")
 
 # MAIN APPLICATION INTERFACE
 
@@ -1591,24 +1455,33 @@ def render_main():
 
     if selected == "View Dashboard":
 
-        render_dashboard()
+        render_dashboard(role)
 
     # CALL WORKER SAFETY
 
     elif selected == "Worker Safety Logs":
 
+        if role not in SAFETY_ROLES:
+            st.error("Access denied.")
+            st.stop()
         render_worker_page(role)
 
     # CALL SAFETY INCIDENTS
 
     elif selected == "Incident Reports":
 
+        if role not in SAFETY_ROLES:
+            st.error("Access denied.")
+            st.stop()
         render_incident_reports(role)
 
     # CALL RISK ASSESSMENT
 
     elif selected == "Risk Matrix":
 
+        if role not in SAFETY_ROLES:
+            st.error("Access denied.")
+            st.stop()
         render_risk_assessment(role)
 
     # CALL EQUIPMENT MODULE
@@ -1624,6 +1497,9 @@ def render_main():
 
     }:
 
+        if role not in EQUIPMENT_ROLES:
+            st.error("Access denied.")
+            st.stop()
         render_equipment_page(role)
 
     # CALL OPERATIONAL REPORTS
@@ -1659,4 +1535,3 @@ if st.session_state.get(
 else:
 
     render_login()
-
